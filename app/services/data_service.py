@@ -46,7 +46,7 @@ class DataService:
                 {'code': '600276', 'name': '恒瑞医药'}
             ]
     
-    def get_stock_daily_data(self, code: str, start_date: str = None, end_date: str = None) -> Optional[pd.DataFrame]:
+    def get_stock_daily_data(self, code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Optional[pd.DataFrame]:
         """获取股票日线数据"""
         try:
             if not start_date:
@@ -95,10 +95,11 @@ class DataService:
             high_list = df['high_price'].rolling(window=n, min_periods=1).max()
             rsv = (df['close_price'] - low_list) / (high_list - low_list) * 100
 
-            k = [50]
-            d = [50]
+            k = [50.0]
+            d = [50.0]
             for i in range(1, len(df)):
-                k.append((2/3) * k[-1] + (1/3) * rsv.iloc[i])
+                rsv_value = float(rsv.iloc[i]) if pd.notna(rsv.iloc[i]) else 50.0
+                k.append((2/3) * k[-1] + (1/3) * rsv_value)
                 d.append((2/3) * d[-1] + (1/3) * k[-1])
             df['k_value'] = k
             df['d_value'] = d
@@ -138,16 +139,16 @@ class DataService:
                 db.add(daily_data)
                 
                 # 保存技术指标数据
-                if 'k_value' in row and pd.notna(row['k_value']):
+                if 'k_value' in row and pd.notna(row['k_value']) and not pd.isna(row['k_value']):
                     indicator_data = StockIndicator(
                         code=code,
                         trade_date=row['trade_date'],
-                        k_value=row['k_value'],
-                        d_value=row['d_value'],
-                        j_value=row['j_value'],
-                        ma5=row.get('ma5', 0),
-                        ma10=row.get('ma10', 0),
-                        ma20=row.get('ma20', 0)
+                        k_value=float(row['k_value']) if pd.notna(row['k_value']) else 0.0,
+                        d_value=float(row['d_value']) if pd.notna(row['d_value']) else 0.0,
+                        j_value=float(row['j_value']) if pd.notna(row['j_value']) else 0.0,
+                        ma5=float(row.get('ma5', 0)) if pd.notna(row.get('ma5', 0)) else 0.0,
+                        ma10=float(row.get('ma10', 0)) if pd.notna(row.get('ma10', 0)) else 0.0,
+                        ma20=float(row.get('ma20', 0)) if pd.notna(row.get('ma20', 0)) else 0.0
                     )
                     db.add(indicator_data)
             
@@ -180,5 +181,51 @@ class DataService:
         except Exception as e:
             self.logger.error(f"获取股票{code}最新数据失败: {e}")
             return None
+
+    def filter_stocks_by_kdj(self, db: Session, j_threshold: float, limit: int = 100) -> List[Dict[str, Any]]:
+        """根据KDJ指标筛选股票 - 筛选J值小于等于指定值的股票"""
+        try:
+            self.logger.info(f"开始筛选J值小于等于{j_threshold}的股票")
+            
+            # 获取所有股票的最新KDJ数据，筛选J值小于等于阈值的股票
+            filtered_stocks = db.query(StockIndicator).filter(
+                StockIndicator.j_value <= j_threshold
+            ).order_by(StockIndicator.j_value.asc()).limit(limit).all()
+            
+            if not filtered_stocks:
+                self.logger.info("未找到满足条件的股票")
+                return []
+            
+            # 获取股票基本信息
+            result = []
+            for indicator in filtered_stocks:
+                # 获取股票名称
+                stock_info = db.query(Stock).filter(Stock.code == indicator.code).first()
+                stock_name = stock_info.name if stock_info else "未知"
+                
+                # 获取最新日线数据
+                latest_daily = db.query(StockDaily).filter(
+                    StockDaily.code == indicator.code
+                ).order_by(StockDaily.trade_date.desc()).first()
+                
+                stock_data = {
+                    'code': indicator.code,
+                    'name': stock_name,
+                    'trade_date': indicator.trade_date.strftime('%Y-%m-%d') if indicator.trade_date else None,
+                    'k_value': round(float(indicator.k_value), 2) if indicator.k_value is not None else 0.0,
+                    'd_value': round(float(indicator.d_value), 2) if indicator.d_value is not None else 0.0,
+                    'j_value': round(float(indicator.j_value), 2) if indicator.j_value is not None else 0.0,
+                    'close_price': float(latest_daily.close_price) if latest_daily and latest_daily.close_price is not None else 0.0,
+                    'volume': float(latest_daily.volume) if latest_daily and latest_daily.volume is not None else 0.0,
+                    'turnover_rate': float(latest_daily.turnover_rate) if latest_daily and latest_daily.turnover_rate is not None else 0.0
+                }
+                result.append(stock_data)
+            
+            self.logger.info(f"成功筛选出{len(result)}只满足条件的股票")
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"KDJ筛选失败: {e}")
+            return []
 
 data_service = DataService() 
